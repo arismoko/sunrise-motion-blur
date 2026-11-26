@@ -15,7 +15,7 @@ mod settings;
 use mod_api::{
     ClientHost, ClientLevelLoadEvent, ClientLevelUnloadEvent, ClientReloadHost,
     ClientResourcesReloadedEvent, ClientSetupContext, ClientSetupEvent, FrameGraphSetupEvent,
-    Hooks, RegisterRenderPipelinesEvent, Registrar, RegistrationContext, SettingChangedEvent,
+    Hooks, Host, RegisterRenderPipelinesEvent, Registrar, RegistrationContext, SettingChangedEvent,
 };
 
 #[derive(Default)]
@@ -35,7 +35,7 @@ impl Hooks for MotionBlur {
         pipelines::register(event);
     }
 
-    fn client_setup(&self, context: &mut dyn ClientSetupContext, _: &mut ClientSetupEvent<'_>) {
+    fn client_setup(&self, context: &mut dyn ClientSetupContext, _: &mut ClientSetupEvent) {
         pipelines::resolve(context.render_assets());
     }
 
@@ -43,7 +43,7 @@ impl Hooks for MotionBlur {
     fn client_resources_reloaded(
         &self,
         context: &dyn ClientReloadHost,
-        _: &mut ClientResourcesReloadedEvent<'_>,
+        _: &mut ClientResourcesReloadedEvent,
     ) {
         pipelines::resolve(context.render_assets());
     }
@@ -58,8 +58,8 @@ impl Hooks for MotionBlur {
         frame::reset();
     }
 
-    fn setting_changed(&self, host: &mut dyn ClientHost, _: &mut SettingChangedEvent<'_>) {
-        settings::load(&*host);
+    fn setting_changed(&self, host: &dyn Host, _: &mut SettingChangedEvent<'_>) {
+        settings::load(host);
     }
 
     fn frame_graph_setup(&self, host: &dyn ClientHost, event: &mut FrameGraphSetupEvent<'_>) {

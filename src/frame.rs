@@ -12,8 +12,8 @@
 
 use crate::{pipelines, settings};
 use mod_api::{
-    ClientHost, DrawBindings, DrawRange, FrameGraphSetupEvent, FramePassDescriptor, FrameTarget,
-    MeshDraw, RenderLevelStage, RenderTargetDescriptor, RenderTargetFormat, TextureSource,
+    ClientHost, DrawBindings, FrameGraphSetupEvent, FramePassDescriptor, FrameTarget, MeshDraw,
+    RenderLevelStage, RenderTargetDescriptor, RenderTargetFormat, TextureSource,
 };
 use motion_blur_core::{BlurParams, CameraHistory, FrameClock, Mat4, SAMPLES};
 use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
@@ -121,7 +121,7 @@ pub fn setup(host: &dyn ClientHost, event: &mut FrameGraphSetupEvent<'_>) {
 fn record(event: &mut FrameGraphSetupEvent<'_>, size: [u32; 2], params: &BlurParams) {
     let tiles_wide = size[0].div_ceil(params.tile_size);
     let tiles_high = size[1].div_ceil(params.tile_size);
-    let transient = |size: [u32; 2]| {
+    let mut transient = |size: [u32; 2]| {
         event.graph.create_transient(
             &RenderTargetDescriptor::new(size).color_target(RenderTargetFormat::Rgba16Float),
         )
@@ -187,12 +187,9 @@ fn record(event: &mut FrameGraphSetupEvent<'_>, size: [u32; 2], params: &BlurPar
         let result = event.graph.add_pass(descriptor, &mut |context| {
             let mut bindings = DrawBindings::default().inline_uniform("Params", bytes);
             for (name, source) in &textures {
-                bindings = bindings.texture(name, source.clone());
+                bindings = bindings.texture(name, *source);
             }
-            let draw = MeshDraw {
-                range: DrawRange::Vertices(0..3),
-                instances: 0..1,
-            };
+            let draw = MeshDraw::vertices(0..3);
             if let Err(error) =
                 context.draw_vertices(pipeline, &[TRIANGLE.as_slice()], None, draw, &bindings)
             {

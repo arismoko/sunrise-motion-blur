@@ -1,6 +1,6 @@
 id = "motion_blur"
 name = "Motion Blur"
-version = "0.1.6"
+version = "0.1.7"
 description = "Adds smooth motion blur."
 authors = ["GeorgeDev22", "arismoko"]
 license = "MIT"
@@ -12,5 +12,5 @@ capabilities = ["registries"]
 
 [native]
 game = "26.3"
-sunrise = "a0584c9ee0"
+sunrise = "ba1f24e4ad41246b558230aa665539dc768b1287"
 
