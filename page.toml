@@ -7,8 +7,10 @@ Adds smooth motion blur to Sunrise.
 
 - Turning, running and flying blur the world as it moves past you.
 - The blur looks the same at any frame rate.
-- Your hand, the hotbar and the menus always stay sharp.
-- When you stand still, nothing is blurred and the mod does no work at all.
+- The mod does no work at all when the camera stands still.
+
+Written on Sunrise's GLSL mod render pipelines. Blurring the finished picture still needs the API to
+let a mod sample and write the main colour target.
 
 ## Settings
 

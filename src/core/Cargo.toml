@@ -3,12 +3,7 @@ name = "motion-blur-core"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "The game-independent half of the motion blur mod: timing, motion history and the GPU data layout"
+description = "The game-independent half of the motion blur mod: timing, camera history and the GPU data layout"
 
 [dependencies]
 bytemuck = { version = "1.25", features = ["derive"] }
-
-[dev-dependencies]
-# The game's shader compiler, so the tests catch a shader error before the game does.
-naga = { version = "=30.0.1", features = ["wgsl-in"] }
-
