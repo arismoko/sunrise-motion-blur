@@ -1,24 +1,7 @@
-//! The data the shader reads, laid out as its `Params` and vertex inputs declare it
-//! (`tests/shader.rs` holds them to it).
+//! The data the shader reads, laid out as its `Params` block declares it (std140)
+//! (`tests/shaders.rs` holds them to it).
 
 use bytemuck::{Pod, Zeroable};
-
-/// One vertex of something that moves on its own: where it is now and where it was last frame,
-/// each relative to that frame's camera.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
-pub struct MotionVertex {
-    pub position: [f32; 3],
-    pub previous: [f32; 3],
-    /// The atlas UV, for the hand's cut-out texels.
-    pub uv: [f32; 2],
-}
-
-impl MotionVertex {
-    pub fn bytes(vertices: &[MotionVertex]) -> &[u8] {
-        bytemuck::cast_slice(vertices)
-    }
-}
 
 /// `Params` in the shader: one frame's cameras and blur settings.
 #[repr(C)]
@@ -30,8 +13,6 @@ pub struct BlurParams {
     pub reproject: [f32; 16],
     /// Last frame's `view_proj`.
     pub previous_view_proj: [f32; 16],
-    /// What the geometry was rasterized with, jitter included.
-    pub jittered: [f32; 16],
     /// Fourth row of `inverse_view_proj`, for 1-dot linear view depth.
     pub inv_view_proj_row3: [f32; 4],
     /// The picture's size and the world depth's, in pixels.

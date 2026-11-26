@@ -1,18 +1,21 @@
-//! What each frame's blur needs, decided on the CPU.
+//! What each frame's blur needs: the camera's motion, decided on the CPU, and the passes that
+//! turn it into a blur, recorded in the frame graph.
 //!
-//! Once the world is drawn (`world_drawn`) the mod works out how the camera and each mob moved.
-//! Once the hand is drawn over it (`work`), the GPU half (`src/mixins/hand_drawn.rs`) is handed a
-//! [`Work`] to draw. The hand and the HUD stay sharp. When nothing on screen moves there is no
-//! `Work`, and the GPU does nothing.
+//! The passes run on the GPU in this order, each reading the one before:
 //!
-//! The game's frame types can't be named here, only in the mixin helpers, so the helpers read
-//! the frame into a [`World`] and a [`Hand`] and keep its GPU objects as [`Kept`] values.
+//! 1. `motion`: every pixel's blur radius and view depth, from the world's depth and last
+//!    frame's camera;
+//! 2. `tile_rows`, `tile_columns`, `neighbor_max`: the longest motion in each tile and its
+//!    neighbours.
+//!
+//! When the camera stands still there are no passes, and the GPU does nothing.
 
-use crate::settings;
-use motion_blur_core::{
-    BlurParams, CameraHistory, FrameClock, Mat4, MeshHistory, MotionVertex, SAMPLES,
+use crate::{pipelines, settings};
+use mod_api::{
+    ClientHost, DrawBindings, DrawRange, FrameGraphSetupEvent, FramePassDescriptor, FrameTarget,
+    MeshDraw, RenderLevelStage, RenderTargetDescriptor, RenderTargetFormat, TextureSource,
 };
-use std::any::Any;
+use motion_blur_core::{BlurParams, CameraHistory, FrameClock, Mat4, SAMPLES};
 use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
@@ -20,71 +23,27 @@ use std::time::Instant;
 const MIN_TILE: u32 = 8;
 const MAX_TILE: u32 = 64;
 
+/// Bytes of one `PositionTexColor` vertex: `Position` (3 x f32), `UV0` (2 x f32), `Color` (4 x u8).
+const VERTEX_BYTES: usize = 24;
+
+/// One oversized triangle that covers the picture, as three `PositionTexColor` vertices.
+static TRIANGLE: LazyLock<Vec<u8>> = LazyLock::new(|| {
+    let mut bytes = Vec::with_capacity(3 * VERTEX_BYTES);
+    for corner in [[-1.0f32, -1.0], [3.0, -1.0], [-1.0, 3.0]] {
+        for value in [corner[0], corner[1], 0.0, 0.0, 0.0] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&[255; 4]);
+    }
+    bytes
+});
+
 static FRAMES: LazyLock<Mutex<Frames>> = LazyLock::new(Default::default);
-
-/// A GPU object of the game's, which only the helpers can name: the world's depth view and its
-/// quad index buffer, kept from one helper to the other.
-pub type Kept = Box<dyn Any + Send + Sync>;
-
-/// The drawn world, as the `world_drawn` helper reads it.
-pub struct World<'a> {
-    /// Camera-relative world to clip space, without TAA's jitter, and with it.
-    pub view_proj: [f32; 16],
-    pub jittered: [f32; 16],
-    /// The camera's position in the world.
-    pub camera: [f64; 3],
-    /// The picture's size and the world depth's, in pixels.
-    pub size: [u32; 2],
-    pub depth_size: [u32; 2],
-    /// Which entity each run of the entity vertices is (the game's `motion` field).
-    pub motion: &'a [(u32, u64)],
-    /// How many entity vertices there are, and where vertex `i` is, camera-relative.
-    pub entities: usize,
-    pub entity_position: &'a dyn Fn(usize) -> [f32; 3],
-    /// Keeps the depth view and the quad indices, when the frame is blurred.
-    pub keep: &'a dyn Fn() -> (Kept, Kept),
-}
-
-/// The drawn hand, as the `hand_drawn` helper reads it.
-pub struct Hand<'a> {
-    /// The hand's own camera-relative world to clip space.
-    pub view_proj: [f32; 16],
-    /// How many hand vertices there are (0 in third person, or without an atlas to read its
-    /// cut-outs from), and vertex `i`'s position and atlas UV.
-    pub vertices: usize,
-    pub vertex: &'a dyn Fn(usize) -> ([f32; 3], [f32; 2]),
-}
-
-/// One frame's blur, for the GPU half to draw.
-pub struct Work {
-    pub params: BlurParams,
-    /// The same frame seen with the hand's camera, for drawing where the hand is.
-    pub hand_params: BlurParams,
-    /// The vertices of mobs that moved by themselves (whole quads); empty when none did.
-    pub objects: Vec<MotionVertex>,
-    /// The hand's vertices, standing still: drawn into the motion so the blur knows the hand is
-    /// in front and leaves it sharp. Empty in third person.
-    pub hand: Vec<MotionVertex>,
-    /// The world's depth view and its quad index buffer, kept from `world_drawn`.
-    pub depth: Kept,
-    pub quad_indices: Kept,
-}
-
-/// What the world step leaves for the hand step of the same frame.
-struct Pending {
-    params: BlurParams,
-    depth: Kept,
-    quad_indices: Kept,
-}
 
 #[derive(Default)]
 struct Frames {
     clock: FrameClock,
     camera: CameraHistory,
-    meshes: MeshHistory,
-    objects: Vec<MotionVertex>,
-    hand_vertices: Vec<MotionVertex>,
-    pending: Option<Pending>,
     frame: u32,
 }
 
@@ -92,8 +51,6 @@ impl Frames {
     fn reset(&mut self) {
         self.clock.reset();
         self.camera.reset();
-        self.meshes.reset();
-        self.pending = None;
     }
 }
 
@@ -101,108 +58,153 @@ fn frames() -> MutexGuard<'static, Frames> {
     FRAMES.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Whether the blur is on; while it isn't, the GPU half lets go of what it made.
-pub fn active() -> bool {
-    settings::current().active()
+/// Forgets the last frame, so the next one starts afresh (a world opened or closed).
+pub fn reset() {
+    frames().reset();
 }
 
-pub fn world_drawn(world: World<'_>) {
+/// Records this frame's blur passes, when the camera moved.
+pub fn setup(host: &dyn ClientHost, event: &mut FrameGraphSetupEvent<'_>) {
     let settings = settings::current();
     let mut frames = frames();
-    let frames = &mut *frames;
     if !settings.active() {
         frames.reset();
         return;
     }
-    frames.pending = None;
+    let Some(size) = host
+        .window_size()
+        .filter(|size| size.iter().all(|&n| n > 0))
+    else {
+        return;
+    };
 
+    let camera = event.view.camera;
+    let view_proj = Mat4(camera.projection).mul(&Mat4(camera.view));
     let frame_seconds = frames.clock.tick(Instant::now());
-    let view_proj = Mat4(world.view_proj);
-    let reprojection = frames.camera.advance(view_proj, world.camera);
-
-    let objects_moved = frames.meshes.update(
-        world.motion,
-        world.entities,
-        world.entity_position,
-        reprojection.map(|r| r.camera_motion),
-        &mut frames.objects,
-    );
-
+    let reprojection = frames.camera.advance(view_proj, camera.position);
     let (Some(frame_seconds), Some(reprojection)) = (frame_seconds, reprojection) else {
         return;
     };
     let Some(inverse) = view_proj.inverse() else {
         return;
     };
-    if !objects_moved && reprojection.is_still(&view_proj) {
+    if reprojection.is_still(&view_proj) {
         return;
     }
 
-    let height = world.size[1];
-    let tile_size = (settings.max_radius(height).ceil() as u32).clamp(MIN_TILE, MAX_TILE);
+    let tile_size = (settings.max_radius(size[1]).ceil() as u32).clamp(MIN_TILE, MAX_TILE);
     let reproject = Mat4::reproject(
         &reprojection.previous_view_proj,
         reprojection.camera_motion,
         &inverse,
     );
     frames.frame = frames.frame.wrapping_add(1);
-    let (depth, quad_indices) = (world.keep)();
-    frames.pending = Some(Pending {
-        params: BlurParams {
-            view_proj: view_proj.0,
-            reproject: reproject.0,
-            previous_view_proj: reprojection.previous_view_proj.0,
-            jittered: world.jittered,
-            inv_view_proj_row3: inverse.row(3),
-            size: world.size.map(|n| n as f32),
-            depth_size: world.depth_size.map(|n| n as f32),
-            exposure: settings.exposure(frame_seconds),
-            max_radius: settings.max_radius(height).min(tile_size as f32),
-            tile_size,
-            samples: SAMPLES,
-            frame: frames.frame,
-            linearize: 0,
-            _pad: [0; 2],
-        },
-        depth,
-        quad_indices,
-    });
-}
-
-/// The frame's blur, once the hand is drawn: `None` when nothing on screen moves.
-pub fn work(hand: Hand<'_>) -> Option<Work> {
-    let mut frames = frames();
-    let frames = &mut *frames;
-    let pending = frames.pending.take()?;
-
-    frames.hand_vertices.clear();
-    frames.hand_vertices.extend((0..hand.vertices).map(|i| {
-        let (position, uv) = (hand.vertex)(i);
-        MotionVertex {
-            position,
-            previous: position,
-            uv,
-        }
-    }));
-    let hand_params = BlurParams {
-        view_proj: hand.view_proj,
-        jittered: hand.view_proj,
-        previous_view_proj: hand.view_proj,
-        ..pending.params
+    let params = BlurParams {
+        view_proj: view_proj.0,
+        reproject: reproject.0,
+        previous_view_proj: reprojection.previous_view_proj.0,
+        inv_view_proj_row3: inverse.row(3),
+        size: size.map(|n| n as f32),
+        depth_size: size.map(|n| n as f32),
+        exposure: settings.exposure(frame_seconds),
+        max_radius: settings.max_radius(size[1]).min(tile_size as f32),
+        tile_size,
+        samples: SAMPLES,
+        frame: frames.frame,
+        linearize: 0,
+        _pad: [0; 2],
     };
-    Some(Work {
-        params: pending.params,
-        hand_params,
-        objects: std::mem::take(&mut frames.objects),
-        hand: std::mem::take(&mut frames.hand_vertices),
-        depth: pending.depth,
-        quad_indices: pending.quad_indices,
-    })
+    drop(frames);
+    record(event, size, &params);
 }
 
-/// Hands a drawn frame's vertex lists back, so the next frame reuses them.
-pub fn recycle(work: Work) {
-    let mut frames = frames();
-    frames.objects = work.objects;
-    frames.hand_vertices = work.hand;
+fn record(event: &mut FrameGraphSetupEvent<'_>, size: [u32; 2], params: &BlurParams) {
+    let tiles_wide = size[0].div_ceil(params.tile_size);
+    let tiles_high = size[1].div_ceil(params.tile_size);
+    let transient = |size: [u32; 2]| {
+        event.graph.create_transient(
+            &RenderTargetDescriptor::new(size).color_target(RenderTargetFormat::Rgba16Float),
+        )
+    };
+    let (Ok(motion), Ok(tile_rows), Ok(tiles), Ok(neighbors)) = (
+        transient(size),
+        transient([tiles_wide, size[1]]),
+        transient([tiles_wide, tiles_high]),
+        transient([tiles_wide, tiles_high]),
+    ) else {
+        return;
+    };
+
+    let bytes = params.bytes();
+    let steps = [
+        (
+            "motion_blur_motion",
+            &pipelines::MOTION,
+            motion,
+            vec![("WorldDepth", TextureSource::WorldDepth)],
+            vec![FrameTarget::MainDepth],
+        ),
+        (
+            "motion_blur_tile_rows",
+            &pipelines::TILE_ROWS,
+            tile_rows,
+            vec![("Motion", TextureSource::TransientTargetColor(motion, 0))],
+            vec![FrameTarget::Transient(motion)],
+        ),
+        (
+            "motion_blur_tile_columns",
+            &pipelines::TILE_COLUMNS,
+            tiles,
+            vec![(
+                "TileRows",
+                TextureSource::TransientTargetColor(tile_rows, 0),
+            )],
+            vec![FrameTarget::Transient(tile_rows)],
+        ),
+        (
+            "motion_blur_neighbor_max",
+            &pipelines::NEIGHBOR_MAX,
+            neighbors,
+            vec![("Tiles", TextureSource::TransientTargetColor(tiles, 0))],
+            vec![FrameTarget::Transient(tiles)],
+        ),
+    ];
+    let mut previous = None;
+    for (label, pass, target, textures, reads) in steps {
+        let Some(pipeline) = pipelines::handle(pass) else {
+            return;
+        };
+        let mut descriptor = FramePassDescriptor::new(label, FrameTarget::Transient(target))
+            .clear_color_0([0.0; 4])
+            .after_stage(RenderLevelStage::AfterTranslucentBlocks)
+            .disable_culling();
+        for read in reads {
+            descriptor = descriptor.reads(read);
+        }
+        if let Some(previous) = previous {
+            descriptor = descriptor.after_pass(previous);
+        }
+        let result = event.graph.add_pass(descriptor, &mut |context| {
+            let mut bindings = DrawBindings::default().inline_uniform("Params", bytes);
+            for (name, source) in &textures {
+                bindings = bindings.texture(name, source.clone());
+            }
+            let draw = MeshDraw {
+                range: DrawRange::Vertices(0..3),
+                instances: 0..1,
+            };
+            if let Err(error) =
+                context.draw_vertices(pipeline, &[TRIANGLE.as_slice()], None, draw, &bindings)
+            {
+                eprintln!("motion_blur: {label} was not drawn: {error:?}");
+            }
+        });
+        match result {
+            Ok(id) => previous = Some(id),
+            Err(error) => {
+                eprintln!("motion_blur: {label} was refused: {error}");
+                return;
+            }
+        }
+    }
 }

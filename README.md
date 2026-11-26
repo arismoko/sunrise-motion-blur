@@ -1,14 +1,24 @@
 # Motion Blur for Sunrise
 
-A native [Sunrise](https://github.com/sunrise-org/sunrise) mod that adds smooth, per-pixel motion blur.
+A [Sunrise](https://github.com/sunrise-org/sunrise) mod that adds smooth, per-pixel motion blur.
 
-- **The camera and what moves on its own.** Turning and moving blur the world by how far each pixel
-  travelled. Things the game draws on the CPU blur by their own motion too. Without a shader pack or
-  frame generation, Sunrise poses mobs on the GPU, where a mod can't see them: they blur with the
-  camera's motion only, as in other motion blur mods. The hand, the HUD and menus stay sharp.
+- **The camera.** Turning and moving blur the world by how far each pixel travelled, found from
+  the world's depth and last frame's camera. The hand, the HUD and menus are meant to stay sharp.
 - **The same at any frame rate.** The streak a motion leaves doesn't depend on your FPS.
-- **Lightweight.** Off, or with nothing on screen moving, it does no GPU work at all. Where nothing moves
-  near a pixel, the blur skips it after a handful of reads. One small dependency (`bytemuck`).
+- **Lightweight.** Off, or with the camera standing still, it records no GPU work at all.
+
+## Known gaps
+
+The mod is written on the typed mod API alone, in GLSL render pipelines and the frame graph. Three
+things it needs are not in the API yet, so the picture is not blurred in game:
+
+- sampling the finished frame (vanilla's main colour target) from a mod pass, and writing the
+  result back to it, which the last pass (`reconstruct.fsh`) needs;
+- the mobs' previous-frame vertex positions, so a mob blurs by its own motion and not only the
+  camera's;
+- a way to tell where the hand is drawn, so it stays sharp.
+
+The motion and tile passes run; `reconstruct.fsh` is written and registered, and waits for the first.
 
 ## Settings
 
@@ -31,29 +41,27 @@ Jimenez's refinements (2014):
    moving thing smears over what is behind it and never over what is in front.
 
 ```
-src/lib.rs       the mod's hooks: settings
-src/render/      the passes, their pipelines and textures
-src/mixins/      the three render functions the game hands to the mod
-src/core/        timing, camera and mob history, the shader and its data layout: plain Rust, tested
+src/lib.rs        the mod's hooks
+src/pipelines.rs  the GLSL render pipelines, one per pass
+src/frame.rs      the camera's motion each frame and the frame graph passes
+src/settings.rs   the Options > Mods page
+src/core/         timing, camera history and the shader data layout: plain Rust, tested
+assets/motion_blur/shaders/   the GLSL programs
 ```
-
-The game calls the mod through Sunrise's render functions (`world_drawn`, `hand_drawn`, `render_needs`),
-which a native mod takes over with a `[[native.mixin]]` row each.
 
 ## Building
 
 You need [`cargo sunrise-mod`](https://sunrise-org.github.io/sunrise/start/install-tool.html).
 
 ```sh
-cargo test --manifest-path src/core/Cargo.toml   # the logic and the shader
+cargo test --manifest-path src/core/Cargo.toml   # the logic and the shader data layout
 cargo sunrise-mod build                          # target/sunrise-mod/motion_blur.smod
 cargo sunrise-mod run --resources <prepared resources> -- --world Test --creative
 ```
 
 Every push builds the mod on GitHub Actions too, and uploads the `.smod` and a game with the mod in it.
 
-Build with the tool from the SDK pinned in `sunrise-mod.toml`. The package tracks the API and render hooks
-it uses, so Sunrise can rebuild it for compatible game builds. Check a build with
+Build with the tool from the SDK pinned in `sunrise-mod.toml`. The package tracks the API it uses, so Sunrise can rebuild it for compatible game builds. Check a build with
 `cargo sunrise-mod check target/sunrise-mod/motion_blur.smod --build <build>`.
 
 ## License

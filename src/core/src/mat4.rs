@@ -1,4 +1,4 @@
-/// A 4×4 matrix in column-major order, as WGSL's `mat4x4<f32>` lays it out.
+/// A 4×4 matrix in column-major order, as GLSL's `mat4` lays it out.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Mat4(pub [f32; 16]);
 
@@ -212,7 +212,15 @@ mod tests {
         let ndc = [0.25, -0.4, 0.01, 1.0];
         let p = mul_vec4(&inv, ndc);
         let world = [p[0] / p[3], p[1] / p[3], p[2] / p[3]];
-        let two_step = mul_vec4(&prev, [world[0] + motion[0], world[1] + motion[1], world[2] + motion[2], 1.0]);
+        let two_step = mul_vec4(
+            &prev,
+            [
+                world[0] + motion[0],
+                world[1] + motion[1],
+                world[2] + motion[2],
+                1.0,
+            ],
+        );
         let one_step = mul_vec4(&reproject, ndc);
         assert!((two_step[0] / two_step[3] - one_step[0] / one_step[3]).abs() < 1e-4);
         assert!((two_step[1] / two_step[3] - one_step[1] / one_step[3]).abs() < 1e-4);
@@ -226,9 +234,16 @@ mod tests {
         // Sky (depth = 0): translation has no effect, matches pure rotation.
         let sky_ndc = [0.25, 0.5, 0.0, 1.0];
         let far = mul_vec4(&inv, [0.25, 0.5, 1e-6, 1.0]);
-        let two_step_sky = mul_vec4(&prev, [far[0] / far[3], far[1] / far[3], far[2] / far[3], 0.0]);
+        let two_step_sky = mul_vec4(
+            &prev,
+            [far[0] / far[3], far[1] / far[3], far[2] / far[3], 0.0],
+        );
         let one_step_sky = mul_vec4(&reproject, sky_ndc);
-        assert!((two_step_sky[0] / two_step_sky[3] - one_step_sky[0] / one_step_sky[3]).abs() < 1e-4);
-        assert!((two_step_sky[1] / two_step_sky[3] - one_step_sky[1] / one_step_sky[3]).abs() < 1e-4);
+        assert!(
+            (two_step_sky[0] / two_step_sky[3] - one_step_sky[0] / one_step_sky[3]).abs() < 1e-4
+        );
+        assert!(
+            (two_step_sky[1] / two_step_sky[3] - one_step_sky[1] / one_step_sky[3]).abs() < 1e-4
+        );
     }
 }
